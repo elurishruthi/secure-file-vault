@@ -13,6 +13,7 @@ import java.time.LocalDateTime;
 uniqueConstraints = {
         @UniqueConstraint(columnNames = {"filename", "owner_id"})
     })
+
 public class FileRecord {
 
     @Id
@@ -28,4 +29,7 @@ public class FileRecord {
     @ManyToOne
     @JoinColumn(name = "owner_id")
     private User owner;
+    
+    @Column(nullable = false)
+    private boolean deleted = false;
 }

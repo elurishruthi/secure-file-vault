@@ -20,8 +20,8 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 
 @Configuration
 @EnableWebSecurity
-@EnableMethodSecurity(prePostEnabled = true)
 @RequiredArgsConstructor
+@EnableMethodSecurity(prePostEnabled = true)
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
@@ -30,12 +30,13 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         return http
-            .cors().and() // ✅ make sure this is BEFORE csrf().disable()
+            .cors().and()
             .csrf(csrf -> csrf.disable())
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/v1/auth/**").permitAll()
-                .requestMatchers("/api/v1/file/admin/**").hasRole("ADMIN") // admin-only
-                .requestMatchers("/api/v1/file/**").hasRole("USER")        // user-only
+                .requestMatchers("/api/v1/auth/**").permitAll() // Allow register/login
+                .requestMatchers("/api/v1/file/search").hasAnyRole("USER", "ADMIN") // Specific match
+                .requestMatchers("/api/v1/file/admin/**").hasRole("ADMIN") // Admin endpoints
+                .requestMatchers("/api/v1/file/**").hasRole("USER") // General user-only endpoints
                 .anyRequest().authenticated()
             )
             .sessionManagement(sess -> sess.sessionCreationPolicy(SessionCreationPolicy.STATELESS))

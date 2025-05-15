@@ -1,10 +1,10 @@
 package com.shruthi.vault.controller;
 
 import com.shruthi.vault.model.FileRecord;
+import com.shruthi.vault.model.Role;
 import com.shruthi.vault.model.User;
 import com.shruthi.vault.repository.FileRecordRepository;
 import com.shruthi.vault.repository.UserRepository;
-
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
@@ -24,7 +24,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/file")
-@CrossOrigin("*") // ✅ good for testing across tools
+@CrossOrigin("*")
 @RequiredArgsConstructor
 public class FileController {
 
@@ -40,22 +40,15 @@ public class FileController {
             @RequestParam("file") MultipartFile file,
             @RequestParam(name = "overwrite", defaultValue = "false") boolean overwrite
     ) throws IOException {
-        System.out.println("📁 uploadFile() controller method was reached.");
-
-        if (file.isEmpty()) {
-            return ResponseEntity.badRequest().body("File is empty");
-        }
+        if (file.isEmpty()) return ResponseEntity.badRequest().body("File is empty");
 
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
         User user = userRepository.findByUsername(username).orElseThrow();
-
         String filename = file.getOriginalFilename();
-        FileRecord existing = fileRecordRepository.findTopByFilenameAndOwner(filename, user);
 
+        FileRecord existing = fileRecordRepository.findTopByFilenameAndOwnerAndDeletedFalse(filename, user);
         if (existing != null && !overwrite) {
-            return ResponseEntity
-                    .status(HttpStatus.CONFLICT)
-                    .body("File with the same name already exists. Use ?overwrite=true to overwrite it.");
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("File with same name exists. Use ?overwrite=true");
         }
 
         if (existing != null && overwrite) {
@@ -64,9 +57,7 @@ public class FileController {
         }
 
         Path uploadPath = Paths.get(uploadDir);
-        if (!Files.exists(uploadPath)) {
-            Files.createDirectories(uploadPath);
-        }
+        if (!Files.exists(uploadPath)) Files.createDirectories(uploadPath);
 
         Path filePath = uploadPath.resolve(filename);
         Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
@@ -76,6 +67,7 @@ public class FileController {
                 .storagePath(filePath.toString())
                 .uploadTime(LocalDateTime.now())
                 .owner(user)
+                .deleted(false)
                 .build();
         fileRecordRepository.save(record);
 
@@ -88,8 +80,7 @@ public class FileController {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
         User user = userRepository.findByUsername(username).orElseThrow();
 
-        List<String> filenames = fileRecordRepository
-                .findByOwner(user)
+        List<String> filenames = fileRecordRepository.findByOwnerAndDeletedFalse(user)
                 .stream()
                 .map(FileRecord::getFilename)
                 .toList();
@@ -103,60 +94,124 @@ public class FileController {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
         User user = userRepository.findByUsername(username).orElseThrow();
 
-        FileRecord record = fileRecordRepository.findTopByFilenameAndOwner(filename, user);
+        FileRecord record = fileRecordRepository.findTopByFilenameAndOwnerAndDeletedFalse(filename, user);
         if (record == null) {
-            throw new RuntimeException("File not found or access denied");
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(null);
         }
 
         Path path = Paths.get(record.getStoragePath());
         Resource resource = new UrlResource(path.toUri());
-
         if (!resource.exists() || !resource.isReadable()) {
-            throw new RuntimeException("Could not read the file");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
         }
 
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
                 .body(resource);
     }
-    
-    
-    @PreAuthorize("hasAuthority('ROLE_USER')")
-    @DeleteMapping("/delete/{filename}")
-    public ResponseEntity<String> deleteFile(@PathVariable String filename) throws IOException {
+
+    @PreAuthorize("hasAnyAuthority('ROLE_USER', 'ROLE_ADMIN')")
+    @GetMapping("/search")
+    public ResponseEntity<List<String>> searchFiles(@RequestParam String keyword) {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
         User user = userRepository.findByUsername(username).orElseThrow();
 
-        FileRecord record = fileRecordRepository.findTopByFilenameAndOwner(filename, user);
-        if (record == null) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body("File not found or you do not have permission to delete it.");
+        List<FileRecord> results;
+        if (user.getRole() == Role.ADMIN) {
+            results = fileRecordRepository.findByFilenameContainingIgnoreCaseAndDeletedFalse(keyword);
+        } else {
+            results = fileRecordRepository.findByOwnerAndFilenameContainingIgnoreCaseAndDeletedFalse(user, keyword);
         }
 
-        // Delete from disk
-        Files.deleteIfExists(Paths.get(record.getStoragePath()));
+        List<String> filenames = results.stream()
+                .map(f -> String.format("User: %s | File: %s", f.getOwner().getUsername(), f.getFilename()))
+                .toList();
 
-        // Delete from DB
-        fileRecordRepository.delete(record);
-
-        return ResponseEntity.ok("File deleted successfully: " + filename);
+        return ResponseEntity.ok(filenames);
     }
-    
-    
+
+    @PreAuthorize("hasAuthority('ROLE_USER')")
+    @DeleteMapping("/delete/{filename}")
+    public ResponseEntity<String> deleteOwnFile(
+            @PathVariable String filename,
+            @RequestParam(name = "confirm", defaultValue = "false") boolean confirm,
+            @RequestParam(name = "hard", defaultValue = "false") boolean hard
+    ) throws IOException {
+        String username = SecurityContextHolder.getContext().getAuthentication().getName();
+        User user = userRepository.findByUsername(username).orElseThrow();
+
+        FileRecord record = fileRecordRepository.findTopByFilenameAndOwnerAndDeletedFalse(filename, user);
+        if (record == null) return ResponseEntity.status(HttpStatus.NOT_FOUND).body("File not found.");
+
+        if (!confirm) return ResponseEntity.status(HttpStatus.CONFLICT).body("\u26a0\ufe0f Are you sure? Use ?confirm=true");
+
+        if (hard) Files.deleteIfExists(Paths.get(record.getStoragePath()));
+        record.setDeleted(true);
+        fileRecordRepository.save(record);
+
+        return ResponseEntity.ok("\u2705 File deleted: " + filename);
+    }
+
+    @PreAuthorize("hasAuthority('ROLE_USER')")
+    @DeleteMapping("/delete-all")
+    public ResponseEntity<String> deleteAllOwnFiles(
+            @RequestParam(name = "confirm", defaultValue = "false") boolean confirm,
+            @RequestParam(name = "hard", defaultValue = "false") boolean hard
+    ) throws IOException {
+        String username = SecurityContextHolder.getContext().getAuthentication().getName();
+        User user = userRepository.findByUsername(username).orElseThrow();
+        List<FileRecord> files = fileRecordRepository.findByOwnerAndDeletedFalse(user);
+
+        if (!confirm) return ResponseEntity.status(HttpStatus.CONFLICT).body("\u26a0\ufe0f Are you sure? Use ?confirm=true");
+
+        for (FileRecord record : files) {
+            if (hard) Files.deleteIfExists(Paths.get(record.getStoragePath()));
+            record.setDeleted(true);
+            fileRecordRepository.save(record);
+        }
+
+        return ResponseEntity.ok("\u2705 All files deleted for user: " + username);
+    }
+
     @PreAuthorize("hasAuthority('ROLE_ADMIN')")
-    @GetMapping("/admin/all-files")
-    public ResponseEntity<List<String>> listAllFiles() {
-        List<FileRecord> allRecords = fileRecordRepository.findAll();
+    @DeleteMapping("/admin/delete/{username}/{filename}")
+    public ResponseEntity<String> deleteSpecificUserFile(
+            @PathVariable String username,
+            @PathVariable String filename,
+            @RequestParam(name = "confirm", defaultValue = "false") boolean confirm,
+            @RequestParam(name = "hard", defaultValue = "false") boolean hard
+    ) throws IOException {
+        User user = userRepository.findByUsername(username).orElseThrow();
+        FileRecord record = fileRecordRepository.findTopByFilenameAndOwnerAndDeletedFalse(filename, user);
+        if (record == null) return ResponseEntity.status(HttpStatus.NOT_FOUND).body("File not found");
 
-        List<String> fileSummaries = allRecords.stream()
-            .map(record -> String.format("User: %s | File: %s | Uploaded: %s",
-                record.getOwner().getUsername(),
-                record.getFilename(),
-                record.getUploadTime()))
-            .toList();
+        if (!confirm) return ResponseEntity.status(HttpStatus.CONFLICT).body("\u26a0\ufe0f Are you sure? Use ?confirm=true");
 
-        return ResponseEntity.ok(fileSummaries);
+        if (hard) Files.deleteIfExists(Paths.get(record.getStoragePath()));
+        record.setDeleted(true);
+        fileRecordRepository.save(record);
+
+        return ResponseEntity.ok("\u2705 File deleted: " + filename + " for user: " + username);
     }
 
+    @PreAuthorize("hasAuthority('ROLE_ADMIN')")
+    @DeleteMapping("/admin/delete-all/{username}")
+    public ResponseEntity<String> deleteAllUserFiles(
+            @PathVariable String username,
+            @RequestParam(name = "confirm", defaultValue = "false") boolean confirm,
+            @RequestParam(name = "hard", defaultValue = "false") boolean hard
+    ) throws IOException {
+        User user = userRepository.findByUsername(username).orElseThrow();
+        List<FileRecord> files = fileRecordRepository.findByOwnerAndDeletedFalse(user);
 
+        if (!confirm) return ResponseEntity.status(HttpStatus.CONFLICT).body("\u26a0\ufe0f Are you sure? Use ?confirm=true");
+
+        for (FileRecord record : files) {
+            if (hard) Files.deleteIfExists(Paths.get(record.getStoragePath()));
+            record.setDeleted(true);
+            fileRecordRepository.save(record);
+        }
+
+        return ResponseEntity.ok("\u2705 Deleted " + files.size() + " files for user: " + username);
+    }
 }

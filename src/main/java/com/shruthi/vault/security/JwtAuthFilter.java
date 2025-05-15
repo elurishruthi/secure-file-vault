@@ -60,6 +60,9 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                         .map(SimpleGrantedAuthority::new)
                         .collect(Collectors.toList());
                 System.out.println("User authorities (from JWT): " + authorities);
+                System.out.println("Authorities added to token: " + authorities);
+                System.out.println("Username: " + userDetails.getUsername());
+
                 
 
                 UsernamePasswordAuthenticationToken authToken =
